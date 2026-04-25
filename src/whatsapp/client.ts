@@ -86,15 +86,27 @@ export async function startWhatsAppClient(): Promise<void> {
     }
 
     if (connection === "close") {
-      const status = (
-        lastDisconnect?.error as { output?: { statusCode?: number } } | undefined
-      )?.output?.statusCode;
+      const errAny = lastDisconnect?.error as
+        | { output?: { statusCode?: number; payload?: unknown }; message?: string }
+        | undefined;
+      const status = errAny?.output?.statusCode;
+      const errMessage = errAny?.message;
+      const errPayload = errAny?.output?.payload;
       const isLoggedOut = status === DisconnectReason.loggedOut;
       const wasRegistered = !!sock?.authState.creds.registered;
 
       logger.warn(
-        { status, isLoggedOut, wasRegistered, pairingInProgress },
-        "WhatsApp connection closed"
+        {
+          status,
+          isLoggedOut,
+          wasRegistered,
+          pairingInProgress,
+          errMessage,
+          errPayload,
+        },
+        wasRegistered
+          ? "WhatsApp connection closed (was registered)"
+          : "WhatsApp pairing session closed before registration — pairing code (if any) is now invalid"
       );
 
       sock = null;
@@ -167,11 +179,16 @@ export async function requestPairing(
     }
 
     const code = await sock.requestPairingCode(digits);
-    logger.info({ digits }, "Pairing code generated");
+    logger.info(
+      { digits, code },
+      "Pairing code generated. Socket must stay alive until user enters it on phone."
+    );
     return { ok: true, code };
   } catch (err) {
-    logger.error({ err }, "requestPairing threw");
-    return { ok: false, error: String(err) };
+    const message = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error ? err.stack : undefined;
+    logger.error({ message, stack }, "requestPairing threw");
+    return { ok: false, error: message };
   } finally {
     pairingInProgress = false;
   }
