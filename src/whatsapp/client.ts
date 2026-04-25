@@ -53,7 +53,11 @@ export async function startWhatsAppClient(): Promise<void> {
     auth: state,
     logger: logger.child({ module: "baileys" }) as any,
     printQRInTerminal: false,
-    browser: Browsers.appropriate("Minegistics"),
+    // Don't use Browsers.appropriate — on Railway it fills os.release()
+    // with "6.x.x+deb13-cloud-amd64", and the literal "cloud" in the
+    // fingerprint trips WhatsApp's anti-abuse filter (405 Method Not Allowed
+    // during the noise handshake). Pin a clean Ubuntu/Chrome tuple instead.
+    browser: Browsers.ubuntu("Chrome"),
     syncFullHistory: false,
     markOnlineOnConnect: false,
   });
