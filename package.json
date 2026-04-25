@@ -19,10 +19,10 @@
     "baileys": "^6.7.0",
     "hono": "^4.7.0",
     "https-proxy-agent": "^7.0.6",
-    "socks-proxy-agent": "^8.0.5",
     "pino": "^9.5.0",
     "pino-pretty": "^11.3.0",
     "qrcode": "^1.5.4",
+    "socks-proxy-agent": "^8.0.5",
     "zod": "^3.25.0"
   },
   "devDependencies": {

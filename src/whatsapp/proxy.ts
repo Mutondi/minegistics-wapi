@@ -1,26 +1,31 @@
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
-import type { Agent } from "node:http";
+import type { Agent as HttpsAgent } from "node:https";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
 
 /*
-  Build a Node http.Agent for the configured PROXY_URL, picking the right
+  Build a Node Agent for the configured PROXY_URL, picking the right
   implementation based on the URL scheme:
 
     socks://       → SocksProxyAgent (defaults to SOCKS5)
     socks5://      → SocksProxyAgent
     socks4://      → SocksProxyAgent (lib supports v4 if scheme says so)
-    http://        → HttpsProxyAgent
+    http://        → HttpsProxyAgent  (HTTP CONNECT tunnels HTTPS too)
     https://       → HttpsProxyAgent
 
   Returns null if no proxy is configured. Cached so we reuse one connection
   pool across the WS + media-fetch agents.
+
+  Type note: Baileys + the ws library type `agent` as https.Agent. The
+  proxy libraries above implement the same runtime interface (extending
+  agent-base), but TS's structural check doesn't consider them assignable
+  without an explicit cast.
 */
 
-let _agent: Agent | null = null;
+let _agent: HttpsAgent | null = null;
 
-export function proxyAgent(): Agent | null {
+export function proxyAgent(): HttpsAgent | null {
   if (_agent) return _agent;
   if (!config.PROXY_URL) return null;
 
@@ -28,10 +33,10 @@ export function proxyAgent(): Agent | null {
   const scheme = url.split(":")[0]?.toLowerCase() ?? "";
 
   if (scheme.startsWith("socks")) {
-    _agent = new SocksProxyAgent(url) as unknown as Agent;
+    _agent = new SocksProxyAgent(url) as unknown as HttpsAgent;
     logger.info({ scheme }, "WhatsApp proxy enabled (SOCKS)");
   } else if (scheme === "http" || scheme === "https") {
-    _agent = new HttpsProxyAgent(url) as unknown as Agent;
+    _agent = new HttpsProxyAgent(url) as unknown as HttpsAgent;
     logger.info({ scheme }, "WhatsApp proxy enabled (HTTP)");
   } else {
     logger.warn({ scheme }, "Unknown PROXY_URL scheme — ignoring proxy");
