@@ -26,6 +26,17 @@ import {
   env (WHATSAPP_API_TOKEN) and the dashboard proxies the request.
 */
 
+type PairBody = { phone?: string };
+type SendBody = { to?: string; text?: string };
+
+async function readJson<T>(c: { req: { json: () => Promise<unknown> } }): Promise<T | null> {
+  try {
+    return (await c.req.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
 export function buildHttp() {
   const app = new Hono();
 
@@ -49,11 +60,12 @@ export function buildHttp() {
   app.get("/admin/whatsapp/status", (c) => c.json(status()));
 
   app.post("/admin/whatsapp/pair", async (c) => {
-    const body = await c.req.json<{ phone?: string }>().catch(() => ({}));
-    if (!body.phone) {
+    const body = await readJson<PairBody>(c);
+    const phone = body?.phone?.trim();
+    if (!phone) {
       return c.json({ error: "phone required" }, 400);
     }
-    const result = await requestPairing(body.phone);
+    const result = await requestPairing(phone);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json({ code: result.code });
   });
@@ -65,14 +77,16 @@ export function buildHttp() {
   });
 
   app.post("/admin/send", async (c) => {
-    const body = await c.req.json<{ to?: string; text?: string }>().catch(() => ({}));
-    if (!body.to || !body.text) {
+    const body = await readJson<SendBody>(c);
+    const to = body?.to?.trim();
+    const text = body?.text;
+    if (!to || !text) {
       return c.json({ error: "to + text required" }, 400);
     }
     const sock = currentSocket();
     if (!sock) return c.json({ error: "not connected" }, 503);
 
-    await sendText(sock, phoneToJid(body.to), body.text);
+    await sendText(sock, phoneToJid(to), text);
     return c.json({ ok: true });
   });
 
