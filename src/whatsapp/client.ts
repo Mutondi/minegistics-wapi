@@ -128,25 +128,6 @@ export async function startWhatsAppClient(): Promise<void> {
   attachHandlers(sock);
 }
 
-/*
-  Wait until the live socket emits a QR (= ready to issue a pairing code).
-  Resolves with `true` if QR arrived in time, `false` on timeout.
-*/
-async function waitForQrEvent(timeoutMs = 15_000): Promise<boolean> {
-  if (!sock) return false;
-  return new Promise<boolean>((resolve) => {
-    const t = setTimeout(() => resolve(false), timeoutMs);
-    const handler = (update: { qr?: string }) => {
-      if (update.qr) {
-        clearTimeout(t);
-        sock?.ev.off("connection.update", handler);
-        resolve(true);
-      }
-    };
-    sock!.ev.on("connection.update", handler);
-  });
-}
-
 export async function requestPairing(
   phone: string
 ): Promise<{ ok: true; code: string } | { ok: false; error: string }> {
@@ -165,18 +146,12 @@ export async function requestPairing(
 
   try {
     // If we don't have a live socket (e.g. last attempt closed without
-    // registering), start a fresh one.
+    // registering, or boot-time idle when no creds existed), start one.
+    // Baileys' requestPairingCode internally waits for the WebSocket to
+    // be ready before sending the request, so we don't need our own wait.
     if (!sock) {
       logger.info("No live socket — starting fresh for pairing");
       await startWhatsAppClient();
-      // Wait for the QR event before calling requestPairingCode.
-      const ready = await waitForQrEvent();
-      if (!ready) {
-        return {
-          ok: false,
-          error: "Timed out waiting for WhatsApp socket to be ready. Try again.",
-        };
-      }
     }
 
     if (!sock) {
