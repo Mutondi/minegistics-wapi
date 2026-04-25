@@ -2,13 +2,18 @@ import { serve } from "@hono/node-server";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { startWhatsAppClient } from "./whatsapp/client.js";
+import { loadAuthState } from "./whatsapp/auth.js";
 import { buildHttp } from "./http/routes.js";
 
 /*
   Boot:
     1. Start the Hono HTTP server (health, readiness, admin)
-    2. Initialise Baileys (loads persisted session if present, otherwise
-       sits idle until POST /admin/whatsapp/pair triggers pairing)
+    2. Inspect persisted Baileys creds:
+         - registered → connect now (operational mode)
+         - not registered → stay idle. The dashboard's
+           POST /admin/whatsapp/pair will lazy-start the client when an
+           admin enters a phone number. Avoids the connect-fail-loop noise
+           on a fresh deploy with no paired number.
     3. Graceful shutdown on SIGTERM/SIGINT
 */
 
@@ -29,10 +34,24 @@ async function main() {
   );
 
   // Don't block boot on Baileys — the HTTP server must come up first
-  // so Railway's healthcheck succeeds. Baileys connects in the background.
-  startWhatsAppClient().catch((err) => {
-    logger.error({ err }, "WhatsApp client failed to start");
+  // so Railway's healthcheck succeeds.
+  await maybeAutoConnect().catch((err) => {
+    logger.error({ err }, "Boot-time auto-connect check failed");
   });
+}
+
+async function maybeAutoConnect() {
+  const { state } = await loadAuthState();
+  if (state.creds.registered) {
+    logger.info("Persisted session found — connecting to WhatsApp");
+    startWhatsAppClient().catch((err) => {
+      logger.error({ err }, "WhatsApp client failed to start");
+    });
+  } else {
+    logger.info(
+      "No paired session — idle. Use POST /admin/whatsapp/pair from the dashboard to pair a number."
+    );
+  }
 }
 
 function shutdown(signal: string) {
