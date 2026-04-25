@@ -1,4 +1,4 @@
-import { useMultiFileAuthState, type AuthenticationState } from "@whiskeysockets/baileys";
+import { useMultiFileAuthState, type AuthenticationState } from "baileys";
 import { mkdirSync } from "node:fs";
 import { config } from "../config.js";
 import { logger } from "../logger.js";

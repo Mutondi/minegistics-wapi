@@ -1,4 +1,4 @@
-import type { WASocket } from "@whiskeysockets/baileys";
+import type { WASocket } from "baileys";
 import { logger } from "../logger.js";
 
 /*

@@ -3,8 +3,7 @@ import {
   Browsers,
   DisconnectReason,
   type WASocket,
-} from "@whiskeysockets/baileys";
-import { Boom } from "@hapi/boom";
+} from "baileys";
 import qrcode from "qrcode";
 import { rm } from "node:fs/promises";
 import { config } from "../config.js";
@@ -78,7 +77,12 @@ export async function startWhatsAppClient(): Promise<void> {
     }
 
     if (connection === "close") {
-      const status = (lastDisconnect?.error as Boom)?.output?.statusCode;
+      // lastDisconnect.error is a Boom-shaped object (output.statusCode)
+      // but baileys exports the type opaquely — cast minimally rather than
+      // pulling in @hapi/boom as a direct dep.
+      const status = (
+        lastDisconnect?.error as { output?: { statusCode?: number } } | undefined
+      )?.output?.statusCode;
       const isLoggedOut = status === DisconnectReason.loggedOut;
       logger.warn({ status, isLoggedOut }, "WhatsApp connection closed");
 

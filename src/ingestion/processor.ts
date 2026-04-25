@@ -1,5 +1,5 @@
-import type { WAMessage, WASocket } from "@whiskeysockets/baileys";
-import { downloadMediaMessage } from "@whiskeysockets/baileys";
+import type { WAMessage, WASocket } from "baileys";
+import { downloadMediaMessage } from "baileys";
 import { supabase } from "../supabase/admin.js";
 import { logger } from "../logger.js";
 import { uploadMedia } from "./storage.js";
