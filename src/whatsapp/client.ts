@@ -54,7 +54,6 @@ export async function startWhatsAppClient(): Promise<void> {
     markOnlineOnConnect: false,
     // When set, all WS + media-fetch traffic routes through the proxy.
     // Recommended in production to stabilise the outbound IP.
-    ...(agent ? { agent, fetchAgent: agent } : {}),
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -87,7 +86,10 @@ export async function startWhatsAppClient(): Promise<void> {
 
     if (connection === "close") {
       const errAny = lastDisconnect?.error as
-        | { output?: { statusCode?: number; payload?: unknown }; message?: string }
+        | {
+            output?: { statusCode?: number; payload?: unknown };
+            message?: string;
+          }
         | undefined;
       const status = errAny?.output?.statusCode;
       const errMessage = errAny?.message;
@@ -194,7 +196,9 @@ export async function requestPairing(
   }
 }
 
-export async function disconnectSession(): Promise<{ ok: true } | { ok: false; error: string }> {
+export async function disconnectSession(): Promise<
+  { ok: true } | { ok: false; error: string }
+> {
   try {
     if (sock?.authState.creds.registered) {
       try {
@@ -207,7 +211,9 @@ export async function disconnectSession(): Promise<{ ok: true } | { ok: false; e
     await rm(config.WA_AUTH_DIR, { recursive: true, force: true });
     // Don't pre-start a new socket — let the next /admin/whatsapp/pair
     // request boot it. Avoids the loop we just fixed.
-    logger.info("Session wiped. Call /admin/whatsapp/pair to begin a new pairing.");
+    logger.info(
+      "Session wiped. Call /admin/whatsapp/pair to begin a new pairing."
+    );
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err) };
