@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+
+# Baileys auth state — never commit; persists session secrets
+auth-state/
+data/
