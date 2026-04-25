@@ -10,7 +10,6 @@ import { config } from "../config.js";
 import { logger } from "../logger.js";
 import { loadAuthState } from "./auth.js";
 import { attachHandlers } from "./handlers.js";
-import { proxyAgent } from "./proxy.js";
 
 /*
   Baileys client manager.
@@ -30,6 +29,12 @@ import { proxyAgent } from "./proxy.js";
 
 let sock: WASocket | null = null;
 let pairingInProgress = false;
+// Resolves when the WS is genuinely usable for a pairing request.
+// For unregistered sessions, that's when WhatsApp emits the QR event
+// (server is now listening for our auth). For registered sessions,
+// connection === "open". Rejects if the socket closes first or we
+// hit the timeout. Reset on every fresh socket.
+let socketReady: Promise<void> | null = null;
 
 export function currentSocket(): WASocket | null {
   return sock;
@@ -43,7 +48,6 @@ export async function startWhatsAppClient(): Promise<void> {
   }
 
   const { state, saveCreds } = await loadAuthState();
-  const agent = proxyAgent();
 
   sock = makeWASocket({
     auth: state,
@@ -52,39 +56,59 @@ export async function startWhatsAppClient(): Promise<void> {
     browser: Browsers.appropriate("Minegistics"),
     syncFullHistory: false,
     markOnlineOnConnect: false,
-    // When set, all WS + media-fetch traffic routes through the proxy.
-    // Recommended in production to stabilise the outbound IP.
   });
 
   sock.ev.on("creds.update", saveCreds);
 
   let loggedQrThisLifetime = false;
+  let resolveReady: (() => void) | null = null;
+  let rejectReady: ((err: Error) => void) | null = null;
+  socketReady = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  // Don't let an unhandled rejection crash the process if nobody awaits this
+  // (e.g. boot-time auto-reconnect). Consumers that care will await it.
+  socketReady.catch(() => {});
+  // Hard ceiling: if neither qr nor open arrives in 20s, fail the gate so
+  // requestPairing returns a clean error instead of hanging.
+  const readyTimer = setTimeout(() => {
+    rejectReady?.(new Error("Socket never reached a pairing-ready state"));
+  }, 20_000);
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr && !loggedQrThisLifetime) {
-      loggedQrThisLifetime = true;
-      try {
-        const ascii = await qrcode.toString(qr, {
-          type: "terminal",
-          small: true,
-        });
-        logger.info(
-          "\n" +
-            ascii +
-            "\nNo phone paired yet — request a pairing code via the dashboard, or scan this QR."
-        );
-      } catch {
-        logger.info({ qr }, "QR string (raw)");
+    if (qr) {
+      // QR event = server is listening for auth. Pairing requests are now safe.
+      clearTimeout(readyTimer);
+      resolveReady?.();
+      if (!loggedQrThisLifetime) {
+        loggedQrThisLifetime = true;
+        try {
+          const ascii = await qrcode.toString(qr, {
+            type: "terminal",
+            small: true,
+          });
+          logger.info(
+            "\n" +
+              ascii +
+              "\nNo phone paired yet — request a pairing code via the dashboard, or scan this QR."
+          );
+        } catch {
+          logger.info({ qr }, "QR string (raw)");
+        }
       }
     }
 
     if (connection === "open") {
+      clearTimeout(readyTimer);
+      resolveReady?.();
       logger.info({ user: sock?.user?.id }, "WhatsApp connection open");
     }
 
     if (connection === "close") {
+      clearTimeout(readyTimer);
       const errAny = lastDisconnect?.error as
         | {
             output?: { statusCode?: number; payload?: unknown };
@@ -96,6 +120,10 @@ export async function startWhatsAppClient(): Promise<void> {
       const errPayload = errAny?.output?.payload;
       const isLoggedOut = status === DisconnectReason.loggedOut;
       const wasRegistered = !!sock?.authState.creds.registered;
+      // Fail any pending pairing wait so the caller gets a real error.
+      rejectReady?.(
+        new Error(errMessage ?? `Socket closed (status=${status ?? "unknown"})`)
+      );
 
       logger.warn(
         {
@@ -178,6 +206,21 @@ export async function requestPairing(
         error:
           "A number is already paired. Disconnect first to pair a different number.",
       };
+    }
+
+    // Wait until WhatsApp is actually listening (qr event for unregistered,
+    // open for registered). Without this, requestPairingCode can race ahead
+    // of the WS handshake and throw "Connection Closed".
+    if (socketReady) {
+      try {
+        await socketReady;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          error: `Socket failed to reach pairing-ready state: ${message}`,
+        };
+      }
     }
 
     const code = await sock.requestPairingCode(digits);
