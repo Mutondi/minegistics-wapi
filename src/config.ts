@@ -25,17 +25,6 @@ const schema = z.object({
   // volume here so the session survives redeploys.
   WA_AUTH_DIR: z.string().default("./data/auth-state"),
 
-  // Optional outbound proxy for the WhatsApp WebSocket + media fetches.
-  // Recommended in production — Railway's data-center IPs can get flagged,
-  // especially if the paired phone is in a different region. Use a
-  // residential proxy in the same country as the paired number.
-  //
-  // Supported schemes:
-  //   http://user:pass@host:port
-  //   https://user:pass@host:port
-  //   socks5://user:pass@host:port
-  PROXY_URL: z.string().url().optional(),
-
   // Required — gates the /admin/* endpoints. The v2 dashboard stores
   // this server-side and never exposes it to the browser.
   ADMIN_TOKEN: z.string().min(16),
