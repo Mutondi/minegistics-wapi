@@ -10,35 +10,40 @@ import { config } from "../config.js";
 import { logger } from "../logger.js";
 import { loadAuthState } from "./auth.js";
 import { attachHandlers } from "./handlers.js";
+import { proxyAgent } from "./proxy.js";
 
 /*
   Baileys client manager.
 
-  Pairing is no longer auto-driven from env. On boot:
-    - If a persisted session exists in WA_AUTH_DIR, the client connects
-      using it. No interaction needed.
-    - If no session exists, the socket sits idle in the "needs pairing"
-      state. The frontend calls POST /admin/whatsapp/pair with a phone
-      number to drive the pairing flow.
-
-  Public surface (exported below) is the minimum the HTTP layer needs:
-    - currentSocket()       → the active WASocket or null
-    - requestPairing(phone) → ask Baileys for a pairing code
-    - disconnectSession()   → log out + wipe auth + restart
-    - status()              → connection summary
-
-  Reconnection is automatic on transient drops; on a "logged out"
-  disconnect we stop and wait for the frontend to re-pair.
+  Lifecycle:
+    - Boot: if persisted creds exist → connect and stay connected.
+                 if not → start a socket but DON'T reconnect on close. The
+                 socket sits waiting for /admin/whatsapp/pair to drive
+                 the pairing flow.
+    - Pair:  /admin/whatsapp/pair starts a fresh socket if needed,
+                 waits for the QR event, calls requestPairingCode, returns
+                 the code to the caller.
+    - Drop:  if a registered session drops mid-life → auto-reconnect.
+                 if an unregistered (pairing) session drops → stop. Don't
+                 churn the WebSocket; let the user retry.
 */
 
 let sock: WASocket | null = null;
+let pairingInProgress = false;
 
 export function currentSocket(): WASocket | null {
   return sock;
 }
 
 export async function startWhatsAppClient(): Promise<void> {
+  // Avoid creating a second client if one is already alive
+  if (sock) {
+    logger.debug("startWhatsAppClient called but socket already alive");
+    return;
+  }
+
   const { state, saveCreds } = await loadAuthState();
+  const agent = proxyAgent();
 
   sock = makeWASocket({
     auth: state,
@@ -47,16 +52,20 @@ export async function startWhatsAppClient(): Promise<void> {
     browser: Browsers.appropriate("Minegistics"),
     syncFullHistory: false,
     markOnlineOnConnect: false,
+    // When set, all WS + media-fetch traffic routes through the proxy.
+    // Recommended in production to stabilise the outbound IP.
+    ...(agent ? { agent, fetchAgent: agent } : {}),
   });
 
   sock.ev.on("creds.update", saveCreds);
 
+  let loggedQrThisLifetime = false;
+
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
-      // QR text is also rendered as ASCII to logs as a fallback. The
-      // primary pairing path is the frontend POST /admin/whatsapp/pair.
+    if (qr && !loggedQrThisLifetime) {
+      loggedQrThisLifetime = true;
       try {
         const ascii = await qrcode.toString(qr, {
           type: "terminal",
@@ -65,7 +74,7 @@ export async function startWhatsAppClient(): Promise<void> {
         logger.info(
           "\n" +
             ascii +
-            "\nNo phone paired yet — request a pairing code from the dashboard, or scan this QR."
+            "\nNo phone paired yet — request a pairing code via the dashboard, or scan this QR."
         );
       } catch {
         logger.info({ qr }, "QR string (raw)");
@@ -77,24 +86,37 @@ export async function startWhatsAppClient(): Promise<void> {
     }
 
     if (connection === "close") {
-      // lastDisconnect.error is a Boom-shaped object (output.statusCode)
-      // but baileys exports the type opaquely — cast minimally rather than
-      // pulling in @hapi/boom as a direct dep.
       const status = (
         lastDisconnect?.error as { output?: { statusCode?: number } } | undefined
       )?.output?.statusCode;
       const isLoggedOut = status === DisconnectReason.loggedOut;
-      logger.warn({ status, isLoggedOut }, "WhatsApp connection closed");
+      const wasRegistered = !!sock?.authState.creds.registered;
+
+      logger.warn(
+        { status, isLoggedOut, wasRegistered, pairingInProgress },
+        "WhatsApp connection closed"
+      );
+
+      sock = null;
 
       if (isLoggedOut) {
         logger.error(
           "Logged out — auth state is invalid. Use /admin/whatsapp/disconnect to clear, then pair again."
         );
-        sock = null;
         return;
       }
-      // Transient — reconnect
-      logger.info("Reconnecting in 2s…");
+
+      if (!wasRegistered) {
+        // Initial pairing failed (timeout, 405, etc.). Don't loop —
+        // wait for the next /admin/whatsapp/pair call.
+        logger.info(
+          "Pairing session ended without registration. Waiting for /admin/whatsapp/pair."
+        );
+        return;
+      }
+
+      // Registered + transient drop → reconnect
+      logger.info("Registered session dropped. Reconnecting in 2s…");
       setTimeout(() => {
         startWhatsAppClient().catch((err) =>
           logger.error({ err }, "Reconnect failed")
@@ -106,30 +128,77 @@ export async function startWhatsAppClient(): Promise<void> {
   attachHandlers(sock);
 }
 
+/*
+  Wait until the live socket emits a QR (= ready to issue a pairing code).
+  Resolves with `true` if QR arrived in time, `false` on timeout.
+*/
+async function waitForQrEvent(timeoutMs = 15_000): Promise<boolean> {
+  if (!sock) return false;
+  return new Promise<boolean>((resolve) => {
+    const t = setTimeout(() => resolve(false), timeoutMs);
+    const handler = (update: { qr?: string }) => {
+      if (update.qr) {
+        clearTimeout(t);
+        sock?.ev.off("connection.update", handler);
+        resolve(true);
+      }
+    };
+    sock!.ev.on("connection.update", handler);
+  });
+}
+
 export async function requestPairing(
   phone: string
 ): Promise<{ ok: true; code: string } | { ok: false; error: string }> {
-  if (!sock) {
-    return { ok: false, error: "WhatsApp client is not initialised" };
-  }
-  if (sock.authState.creds.registered) {
-    return {
-      ok: false,
-      error:
-        "A number is already paired. Disconnect first to pair a different number.",
-    };
-  }
-  // Baileys requires the number as digits only, no '+' or spaces.
   const digits = phone.replace(/[^0-9]/g, "");
   if (digits.length < 8) {
     return { ok: false, error: "Phone number looks too short" };
   }
+
+  if (pairingInProgress) {
+    return {
+      ok: false,
+      error: "A pairing attempt is in progress. Wait a few seconds and retry.",
+    };
+  }
+  pairingInProgress = true;
+
   try {
+    // If we don't have a live socket (e.g. last attempt closed without
+    // registering), start a fresh one.
+    if (!sock) {
+      logger.info("No live socket — starting fresh for pairing");
+      await startWhatsAppClient();
+      // Wait for the QR event before calling requestPairingCode.
+      const ready = await waitForQrEvent();
+      if (!ready) {
+        return {
+          ok: false,
+          error: "Timed out waiting for WhatsApp socket to be ready. Try again.",
+        };
+      }
+    }
+
+    if (!sock) {
+      return { ok: false, error: "WhatsApp client failed to initialise" };
+    }
+
+    if (sock.authState.creds.registered) {
+      return {
+        ok: false,
+        error:
+          "A number is already paired. Disconnect first to pair a different number.",
+      };
+    }
+
     const code = await sock.requestPairingCode(digits);
-    logger.info({ digits }, "Pairing code generated for frontend request");
+    logger.info({ digits }, "Pairing code generated");
     return { ok: true, code };
   } catch (err) {
+    logger.error({ err }, "requestPairing threw");
     return { ok: false, error: String(err) };
+  } finally {
+    pairingInProgress = false;
   }
 }
 
@@ -144,8 +213,9 @@ export async function disconnectSession(): Promise<{ ok: true } | { ok: false; e
     }
     sock = null;
     await rm(config.WA_AUTH_DIR, { recursive: true, force: true });
-    // Restart fresh — the new socket will sit waiting for a pairing call.
-    await startWhatsAppClient();
+    // Don't pre-start a new socket — let the next /admin/whatsapp/pair
+    // request boot it. Avoids the loop we just fixed.
+    logger.info("Session wiped. Call /admin/whatsapp/pair to begin a new pairing.");
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err) };

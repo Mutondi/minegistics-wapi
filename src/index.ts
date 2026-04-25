@@ -15,13 +15,21 @@ import { buildHttp } from "./http/routes.js";
 async function main() {
   const app = buildHttp();
 
+  // Bind 0.0.0.0 explicitly so Railway's healthcheck can reach us.
+  // (Default is also 0.0.0.0 but being explicit removes ambiguity.)
   serve(
-    { fetch: app.fetch, port: config.PORT },
+    {
+      fetch: app.fetch,
+      port: config.PORT,
+      hostname: "0.0.0.0",
+    },
     (info) => {
-      logger.info({ port: info.port }, "HTTP listening");
+      logger.info({ port: info.port, host: "0.0.0.0" }, "HTTP listening");
     }
   );
 
+  // Don't block boot on Baileys — the HTTP server must come up first
+  // so Railway's healthcheck succeeds. Baileys connects in the background.
   startWhatsAppClient().catch((err) => {
     logger.error({ err }, "WhatsApp client failed to start");
   });
